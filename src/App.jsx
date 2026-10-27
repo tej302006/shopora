@@ -212,12 +212,14 @@ function Cart({ cart, setCart }) {
   );
 }
 
-/* CHECKOUT - creates an order in Supabase */
+/* CHECKOUT - Supabase orders + Razorpay payments */
 function Checkout({ cart, setCart }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [placed, setPlaced] = useState(false);
   const [orderNumber, setOrderNumber] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("cod");
+
   const [customerName, setCustomerName] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
@@ -225,191 +227,537 @@ function Checkout({ cart, setCart }) {
   const [city, setCity] = useState("");
   const [pinCode, setPinCode] = useState("");
 
-  const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const subtotal = cart.reduce(
+    (sum, item) => sum + item.price * item.quantity,
+    0
+  );
+
   const delivery = deliveryFee(subtotal);
   const total = subtotal + delivery;
+
+  // Load Razorpay Checkout securely from Razorpay's hosted script.
+  async function loadRazorpayScript() {
+    if (window.Razorpay) return true;
+
+    return new Promise((resolve) => {
+      const script = document.createElement("script");
+
+      script.src = "https://checkout.razorpay.com/v1/checkout.js";
+      script.async = true;
+
+      script.onload = () => resolve(Boolean(window.Razorpay));
+      script.onerror = () => resolve(false);
+
+      document.body.appendChild(script);
+    });
+  }
 
   async function handlePlaceOrder(event) {
     event.preventDefault();
     setError("");
 
-    if (!customerName.trim() || !customerPhone.trim() || !address.trim() || !city.trim() || !pinCode.trim()) {
-      setError("Please fill in your name, phone number, address, city and PIN code.");
+    if (
+      !customerName.trim() ||
+      !customerPhone.trim() ||
+      !address.trim() ||
+      !city.trim() ||
+      !pinCode.trim()
+    ) {
+      setError(
+        "Please fill in your name, phone number, address, city and PIN code."
+      );
       return;
     }
+
     if (!/^[6-9]\d{9}$/.test(customerPhone.trim())) {
       setError("Enter a valid 10-digit Indian mobile number.");
       return;
     }
+
     if (!/^\d{6}$/.test(pinCode.trim())) {
       setError("Enter a valid 6-digit PIN code.");
       return;
     }
-    if (customerEmail.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail.trim())) {
+
+    if (
+      customerEmail.trim() &&
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail.trim())
+    ) {
       setError("Enter a valid email address or leave it blank.");
       return;
     }
+
     if (!cart.length) {
       setError("Your cart is empty.");
       return;
     }
 
     setLoading(true);
+
+    // Keep this true while Razorpay's payment window is open.
+    let checkoutOpened = false;
+
     try {
+      // Load Razorpay before creating an order to avoid unnecessary
+      // pending orders when the payment script cannot load.
+      if (paymentMethod === "online") {
+        const loaded = await loadRazorpayScript();
+
+        if (!loaded) {
+          throw new Error(
+            "Razorpay could not load. Please check your internet connection and try again."
+          );
+        }
+      }
+
       const items = cart.map((item) => ({
         product_id: String(item.id),
         product_name: item.name,
         quantity: Number(item.quantity),
         unit_price_paise: Math.round(Number(item.price) * 100),
       }));
+      if (!customerEmail.trim()) {
+  throw new Error("Please enter your email address before placing the order.");
+}
 
-      const { data, error: orderError } = await supabase.rpc("create_shopora_order", {
-        p_customer_name: customerName.trim(),
-        p_customer_email: customerEmail.trim() || null,
-        p_customer_phone: customerPhone.trim(),
-        p_shipping_address: {
-          address: address.trim(),
-          city: city.trim(),
-          pin_code: pinCode.trim(),
-          country: "India",
-        },
-        p_items: items,
-      });
+      // Create the Shopora order using your existing Supabase function.
+      const { data, error: orderError } = await supabase.rpc(
+        "create_shopora_order",
+        {
+          p_customer_name: customerName.trim(),
+          p_customer_email: customerEmail.trim(),
+          p_customer_phone: customerPhone.trim(),
+          p_shipping_address: {
+            address: address.trim(),
+            city: city.trim(),
+            pin_code: pinCode.trim(),
+            country: "India",
+          },
+          p_items: items,
+        }
+      );
 
       if (orderError) throw orderError;
+
       if (!data?.order_id || !data?.order_number) {
-        throw new Error("The order response was incomplete. Please check your Supabase order table before retrying.");
+        throw new Error(
+          "The order response was incomplete. Please check your Supabase orders before trying again."
+        );
       }
 
-      setOrderNumber(data.order_number);
-      setPlaced(true);
-      setCart([]);
+      // CASH ON DELIVERY
+      if (paymentMethod === "cod") {
+        setOrderNumber(data.order_number);
+        setPlaced(true);
+        setCart([]);
+        return;
+      }
+
+      // ONLINE PAYMENT: request a Razorpay order from our server.
+      const createPaymentResponse = await fetch(
+        "/api/create-razorpay-order",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            orderId: data.order_id,
+          }),
+        }
+      );
+
+      const paymentOrder = await createPaymentResponse.json();
+
+      if (!createPaymentResponse.ok) {
+        throw new Error(
+          paymentOrder.error ||
+            "Could not start the online payment. Please try again."
+        );
+      }
+
+      if (
+        !paymentOrder.id ||
+        !paymentOrder.keyId ||
+        !paymentOrder.amount ||
+        !paymentOrder.currency
+      ) {
+        throw new Error(
+          "The payment gateway returned incomplete information."
+        );
+      }
+
+      const options = {
+        key: paymentOrder.keyId,
+        amount: paymentOrder.amount,
+        currency: paymentOrder.currency,
+        name: "Shopora",
+        description: `Order ${data.order_number}`,
+        order_id: paymentOrder.id,
+
+        prefill: {
+          name: customerName.trim(),
+          email: customerEmail.trim(),
+          contact: customerPhone.trim(),
+        },
+
+        theme: {
+          color: "#111827",
+        },
+
+        // Called by Razorpay after the customer completes payment.
+        handler: async function (response) {
+          setLoading(true);
+          setError("");
+
+          try {
+            const verifyResponse = await fetch(
+              "/api/verify-razorpay-payment",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  orderId: data.order_id,
+                  razorpay_order_id: response.razorpay_order_id,
+                  razorpay_payment_id: response.razorpay_payment_id,
+                  razorpay_signature: response.razorpay_signature,
+                }),
+              }
+            );
+
+            const verification = await verifyResponse.json();
+
+            if (!verifyResponse.ok || verification.verified !== true) {
+              throw new Error(
+                verification.error ||
+                  "Payment verification failed. Do not retry payment immediately. Contact Shopora support with your order number."
+              );
+            }
+
+            // Only show success and clear the cart after server verification.
+            setOrderNumber(data.order_number);
+            setPaymentMethod("online");
+            setPlaced(true);
+            setCart([]);
+          } catch (err) {
+            console.error("Shopora payment verification error:", err);
+
+            setError(
+              err?.message ||
+                "We could not verify the payment. Keep your order number and contact Shopora support before paying again."
+            );
+          } finally {
+            setLoading(false);
+          }
+        },
+
+        modal: {
+          ondismiss: function () {
+            setLoading(false);
+            setError(
+              `Payment was cancelled or the payment window was closed. Your order ${data.order_number} may still be pending. Your cart has been kept. Check the order status before trying another payment.`
+            );
+          },
+        },
+      };
+
+      const razorpay = new window.Razorpay(options);
+
+      razorpay.on("payment.failed", function (response) {
+        setLoading(false);
+
+        const description =
+          response?.error?.description ||
+          "The payment did not complete.";
+
+        setError(
+          `${description} Your cart has been kept. Check your order status before attempting another payment.`
+        );
+      });
+
+      checkoutOpened = true;
+      razorpay.open();
     } catch (err) {
-      console.error("Shopora order error:", err);
-      setError(err?.message || "We couldn't place your order. Please try again.");
+      console.error("Shopora checkout error:", err);
+
+      setError(
+        err?.message ||
+          "We couldn't complete checkout. Please try again."
+      );
     } finally {
-      setLoading(false);
+      if (!checkoutOpened) {
+        setLoading(false);
+      }
     }
   }
 
   if (placed) {
-    return <div className="empty-page"><div className="success-icon">✓</div><h1>Order Placed Successfully!</h1><p>Thank you for shopping with Shopora.</p><p><strong>Order number: {orderNumber}</strong></p><p>Payment method: Cash on Delivery</p><Link to="/" className="dark-button">Continue Shopping</Link></div>;
+    return (
+      <div className="empty-page">
+        <div className="success-icon">✓</div>
+        <h1>Order Placed Successfully!</h1>
+        <p>Thank you for shopping with Shopora.</p>
+        <p>
+          <strong>Order number: {orderNumber}</strong>
+        </p>
+        <p>
+          Payment method:{" "}
+          {paymentMethod === "cod"
+            ? "Cash on Delivery"
+            : "Online Payment"}
+        </p>
+        <Link to="/" className="dark-button">
+          Continue Shopping
+        </Link>
+      </div>
+    );
   }
 
   if (!cart.length) {
-    return <div className="empty-page"><h1>Your Cart is Empty</h1><Link to="/all" className="dark-button">Shop Now</Link></div>;
+    return (
+      <div className="empty-page">
+        <h1>Your Cart is Empty</h1>
+        <Link to="/all" className="dark-button">
+          Shop Now
+        </Link>
+      </div>
+    );
   }
 
   return (
     <main className="checkout-page">
       <form className="checkout-form" onSubmit={handlePlaceOrder}>
-        <h1>Checkout</h1><h2>Delivery Address</h2>
-        <input aria-label="Full Name" placeholder="Full Name" value={customerName} onChange={(e) => setCustomerName(e.target.value)} autoComplete="name" required />
-        <input aria-label="Email (optional)" type="email" placeholder="Email (optional)" value={customerEmail} onChange={(e) => setCustomerEmail(e.target.value)} autoComplete="email" />
-        <input aria-label="Phone Number" type="tel" placeholder="10-digit Phone Number" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} autoComplete="tel" maxLength={10} required />
-        <textarea aria-label="Complete Address" placeholder="Complete Address" rows="4" value={address} onChange={(e) => setAddress(e.target.value)} autoComplete="street-address" required />
+        <h1>Checkout</h1>
+
+        <h2>Delivery Address</h2>
+
+        <input
+          aria-label="Full Name"
+          placeholder="Full Name"
+          value={customerName}
+          onChange={(e) => setCustomerName(e.target.value)}
+          autoComplete="name"
+          required
+        />
+
+        <input
+          aria-label="Email (optional)"
+          type="email"
+          placeholder="Email (optional)"
+          value={customerEmail}
+          onChange={(e) => setCustomerEmail(e.target.value)}
+          autoComplete="email"
+        />
+
+        <input
+          aria-label="Phone Number"
+          type="tel"
+          placeholder="10-digit Phone Number"
+          value={customerPhone}
+          onChange={(e) => setCustomerPhone(e.target.value)}
+          autoComplete="tel"
+          maxLength={10}
+          required
+        />
+
+        <textarea
+          aria-label="Complete Address"
+          placeholder="Complete Address"
+          rows="4"
+          value={address}
+          onChange={(e) => setAddress(e.target.value)}
+          autoComplete="street-address"
+          required
+        />
+
         <div className="two-inputs">
-          <input aria-label="City" placeholder="City" value={city} onChange={(e) => setCity(e.target.value)} autoComplete="address-level2" required />
-          <input aria-label="PIN Code" placeholder="PIN Code" inputMode="numeric" value={pinCode} onChange={(e) => setPinCode(e.target.value)} autoComplete="postal-code" maxLength={6} required />
+          <input
+            aria-label="City"
+            placeholder="City"
+            value={city}
+            onChange={(e) => setCity(e.target.value)}
+            autoComplete="address-level2"
+            required
+          />
+
+          <input
+            aria-label="PIN Code"
+            placeholder="PIN Code"
+            inputMode="numeric"
+            value={pinCode}
+            onChange={(e) => setPinCode(e.target.value)}
+            autoComplete="postal-code"
+            maxLength={6}
+            required
+          />
         </div>
+
         <h2>Payment Method</h2>
-        <label><input type="radio" name="payment" checked readOnly /> Cash on Delivery</label>
-        <p>UPI and card payments will be available after secure payment gateway setup.</p>
-        {error && <p role="alert" style={{ color: "#b42318" }}>{error}</p>}
-        <button className="checkout-button" type="submit" disabled={loading}>{loading ? "Placing Order..." : "Place Order"}</button>
+
+        <label>
+          <input
+            type="radio"
+            name="payment"
+            value="cod"
+            checked={paymentMethod === "cod"}
+            onChange={() => setPaymentMethod("cod")}
+          />
+          Cash on Delivery
+        </label>
+
+        <label>
+          <input
+            type="radio"
+            name="payment"
+            value="online"
+            checked={paymentMethod === "online"}
+            onChange={() => setPaymentMethod("online")}
+          />
+          Pay Online (UPI / Cards)
+        </label>
+
+        {paymentMethod === "online" && (
+          <p>
+            You will be redirected to Razorpay Checkout to complete your
+            payment securely.
+          </p>
+        )}
+
+        {error && (
+          <p role="alert" style={{ color: "#b42318" }}>
+            {error}
+          </p>
+        )}
+
+        <button
+          className="checkout-button"
+          type="submit"
+          disabled={loading}
+        >
+          {loading
+            ? "Processing..."
+            : paymentMethod === "cod"
+              ? "Place Order"
+              : `Pay ₹${money(total)}`}
+        </button>
       </form>
+
       <div className="cart-summary">
         <h2>Order Summary</h2>
-        {cart.map((item) => <div key={item.id}><span>{item.name} × {item.quantity}</span><strong>₹{money(item.price * item.quantity)}</strong></div>)}
-        <hr /><div><span>Subtotal</span><strong>₹{money(subtotal)}</strong></div>
-        <div><span>Delivery</span><strong>{delivery ? `₹${delivery}` : "FREE"}</strong></div>
-        <div className="total"><span>Total</span><strong>₹{money(total)}</strong></div>
+
+        {cart.map((item) => (
+          <div key={item.id}>
+            <span>
+              {item.name} × {item.quantity}
+            </span>
+            <strong>₹{money(item.price * item.quantity)}</strong>
+          </div>
+        ))}
+
+        <hr />
+
+        <div>
+          <span>Subtotal</span>
+          <strong>₹{money(subtotal)}</strong>
+        </div>
+
+        <div>
+          <span>Delivery</span>
+          <strong>{delivery ? `₹${delivery}` : "FREE"}</strong>
+        </div>
+
+        <div className="total">
+          <span>Total</span>
+          <strong>₹{money(total)}</strong>
+        </div>
       </div>
     </main>
   );
 }
-
-/* ABOUT */
-function About() {
-  return <main className="simple-page"><p>ABOUT SHOPORA</p><h1>Shopping made simple.</h1><p>Shopora is a modern e-commerce platform bringing electronics, fashion, beauty, sports and everyday products together.</p><Link to="/all" className="dark-button">Explore Products</Link></main>;
-}
-
-/* ACCOUNT */
-function Account() {
-  return <div className="simple-page"><div className="empty-icon">👤</div><h1>My Account</h1><p>Manage your Shopora account.</p><Link to="/all" className="dark-button">Continue Shopping</Link></div>;
-}
-
-/* ORDERS */
-function Orders() {
-  return <div className="simple-page"><div className="empty-icon">📦</div><h1>My Orders</h1><p>Order history will be available here in a future update.</p><Link to="/all" className="dark-button">Shop Now</Link></div>;
-}
-
-/* FOOTER */
-function Footer() {
-  return (
-    <footer className="footer"><div className="footer-grid">
-      <div><div className="footer-logo">SHOP<span>ORA</span></div><p>Everything you love,<br />all in one place.</p></div>
-      <div><h3>Shop</h3><Link to="/all">All Products</Link><Link to="/category/electronics">Electronics</Link><Link to="/category/fashion">Fashion</Link><Link to="/category/beauty">Beauty</Link></div>
-      <div><h3>Discover</h3><Link to="/best-sellers">Best Sellers</Link><Link to="/deals">Today's Deals</Link><Link to="/category/sports">Sports</Link><Link to="/category/grocery">Grocery</Link></div>
-      <div><h3>Help</h3><Link to="/about">About Us</Link><Link to="/account">Account</Link><Link to="/orders">Orders</Link><Link to="/cart">Cart</Link></div>
-    </div><div className="footer-bottom">© 2026 Shopora. All rights reserved.</div></footer>
-  );
-}
-
-/* MAIN APP */
 function App() {
-  const [cart, setCart] = useState(() => {
-    try {
-      const saved = localStorage.getItem("shopora-cart");
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  function updateCart(nextCart) {
-    setCart((currentCart) => {
-      const resolved = typeof nextCart === "function" ? nextCart(currentCart) : nextCart;
-      try {
-        localStorage.setItem("shopora-cart", JSON.stringify(resolved));
-      } catch (err) {
-        console.warn("Could not save cart in this browser.", err);
-      }
-      return resolved;
-    });
-  }
+  const [cart, setCart] = useState([]);
 
   function addToCart(product) {
-    updateCart((currentCart) => {
-      const existing = currentCart.find((item) => item.id === product.id);
-      if (existing) return currentCart.map((item) => item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item);
+    setCart((currentCart) => {
+      const existingItem = currentCart.find(
+        (item) => item.id === product.id
+      );
+
+      if (existingItem) {
+        return currentCart.map((item) =>
+          item.id === product.id
+            ? { ...item, quantity: item.quantity + 1 }
+            : item
+        );
+      }
+
       return [...currentCart, { ...product, quantity: 1 }];
     });
   }
 
-  const cartCount = cart.reduce((total, item) => total + item.quantity, 0);
-
   return (
     <BrowserRouter>
-      <Header cartCount={cartCount} />
+      <Header
+        cartCount={cart.reduce(
+          (total, item) => total + item.quantity,
+          0
+        )}
+      />
+
       <Routes>
-        <Route path="/" element={<Home addToCart={addToCart} />} />
-        <Route path="/all" element={<CategoryPage addToCart={addToCart} />} />
-        <Route path="/category/:category" element={<CategoryPage addToCart={addToCart} />} />
-        <Route path="/best-sellers" element={<BestSellers addToCart={addToCart} />} />
-        <Route path="/deals" element={<Deals addToCart={addToCart} />} />
-        <Route path="/product/:id" element={<ProductDetails addToCart={addToCart} />} />
-        <Route path="/search/:query" element={<SearchPage addToCart={addToCart} />} />
-        <Route path="/cart" element={<Cart cart={cart} setCart={updateCart} />} />
-        <Route path="/checkout" element={<Checkout cart={cart} setCart={updateCart} />} />
-        <Route path="/about" element={<About />} />
-        <Route path="/account" element={<Account />} />
-        <Route path="/orders" element={<Orders />} />
-        <Route path="*" element={<div className="empty-page"><h1>Page Not Found</h1><Link to="/" className="dark-button">Back to Home</Link></div>} />
+        <Route
+          path="/"
+          element={<Home addToCart={addToCart} />}
+        />
+
+        <Route
+          path="/all"
+          element={<CategoryPage addToCart={addToCart} />}
+        />
+
+        <Route
+          path="/category/:category"
+          element={<CategoryPage addToCart={addToCart} />}
+        />
+
+        <Route
+          path="/best-sellers"
+          element={<BestSellers addToCart={addToCart} />}
+        />
+
+        <Route
+          path="/deals"
+          element={<Deals addToCart={addToCart} />}
+        />
+
+        <Route
+          path="/product/:id"
+          element={<ProductDetails addToCart={addToCart} />}
+        />
+
+        <Route
+          path="/search/:query"
+          element={<SearchPage addToCart={addToCart} />}
+        />
+
+        <Route
+          path="/cart"
+          element={<Cart cart={cart} setCart={setCart} />}
+        />
+
+        <Route
+          path="/checkout"
+          element={<Checkout cart={cart} setCart={setCart} />}
+        />
+
+        <Route
+          path="*"
+          element={<Home addToCart={addToCart} />}
+        />
       </Routes>
-      <Footer />
     </BrowserRouter>
   );
 }
-
 export default App;
