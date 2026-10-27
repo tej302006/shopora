@@ -1,5 +1,4 @@
-```javascript
-export default async function handler(req, res) {
+﻿export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
@@ -58,7 +57,7 @@ export default async function handler(req, res) {
 
     const amountPaise = Number(order.total_paise);
 
-    // Allow amounts up to ₹20,000,000, subject to Razorpay's own limits.
+    // Allow amounts up to â‚¹20,000,000, subject to Razorpay's own limits.
     if (
       !Number.isSafeInteger(amountPaise) ||
       amountPaise < 100 ||
@@ -139,4 +138,3 @@ export default async function handler(req, res) {
     });
   }
 }
-```

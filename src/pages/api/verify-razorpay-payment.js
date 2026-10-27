@@ -1,5 +1,4 @@
-```javascript
-import crypto from "node:crypto";
+﻿import crypto from "node:crypto";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -200,4 +199,3 @@ export default async function handler(req, res) {
     });
   }
 }
-```
