@@ -1,32 +1,23 @@
+
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-
   <url>
-    <loc>https://dry-pine-7040.tejuprasad456.workers.dev/</loc>
+    <loc>https://shopora-nhes.vercel.app/</loc>
   </url>
-
   <url>
-    <loc>https://dry-pine-7040.tejuprasad456.workers.dev/category/electronics</loc>
+    <loc>https://shopora-nhes.vercel.app/category/electronics</loc>
   </url>
-
   <url>
-    <loc>https://dry-pine-7040.tejuprasad456.workers.dev/category/fashion</loc>
+    <loc>https://shopora-nhes.vercel.app/category/fashion</loc>
   </url>
-
   <url>
-    <loc>https://dry-pine-7040.tejuprasad456.workers.dev/category/home</loc>
+    <loc>https://shopora-nhes.vercel.app/category/beauty</loc>
   </url>
-
   <url>
-    <loc>https://dry-pine-7040.tejuprasad456.workers.dev/category/beauty</loc>
+    <loc>https://shopora-nhes.vercel.app/category/sports</loc>
   </url>
-
   <url>
-    <loc>https://dry-pine-7040.tejuprasad456.workers.dev/category/sports</loc>
+    <loc>https://shopora-nhes.vercel.app/category/grocery</loc>
   </url>
-
-  <url>
-    <loc>https://dry-pine-7040.tejuprasad456.workers.dev/category/grocery</loc>
-  </url>
-
 </urlset>
+
